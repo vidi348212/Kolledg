@@ -1,0 +1,6 @@
+{
+    "check_interval_minutes": 60,
+    "process_check_interval_seconds": 5,
+    "log_directory": "logs",
+    "admin_email": "teacher@school.ru"
+}
