@@ -1,0 +1,25 @@
+{
+    "network": {
+        "teacher_ip": null,
+        "port_command": 54321,
+        "port_discovery": 54322,
+        "heartbeat_interval": 30
+    },
+    "schedule": {
+        "enabled": true,
+        "lessons": [
+            {"start": "08:30", "end": "09:15", "name": "Урок 1"},
+            {"start": "09:25", "end": "10:10", "name": "Урок 2"},
+            {"start": "10:30", "end": "11:15", "name": "Урок 3"},
+            {"start": "11:35", "end": "12:20", "name": "Урок 4"},
+            {"start": "12:40", "end": "13:25", "name": "Урок 5"},
+            {"start": "13:35", "end": "14:20", "name": "Урок 6"}
+        ],
+        "bell_sound": "default",
+        "overlay_timeout_minutes": 5
+    },
+    "client": {
+        "auto_start": true,
+        "log_level": "INFO"
+    }
+}

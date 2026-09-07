@@ -40,16 +40,206 @@ try:
 except ImportError:
     WINDOWS_AVAILABLE = False
 
+
+class NameOverlay:
+    """Плашка с именем студента в углу экрана."""
+    
+    def __init__(self, student_name):
+        self.student_name = student_name
+        self.root = None
+        self.label = None
+        self.running = False
+        self.thread = None
+    
+    def start(self):
+        """Запуск плашки в отдельном потоке."""
+        if self.running:
+            return
+        
+        self.running = True
+        self.thread = threading.Thread(target=self._run_overlay, daemon=True)
+        self.thread.start()
+    
+    def _run_overlay(self):
+        """Основной цикл плашки (должен работать в отдельном потоке)."""
+        import tkinter as tk
+        
+        self.root = tk.Tk()
+        self.root.title("Student Name")
+        
+        # Убираем рамки и делаем окно поверх всех
+        self.root.overrideredirect(True)
+        self.root.attributes('-topmost', True)
+        
+        # Позиция: правый верхний угол
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        
+        width = 300
+        height = 60
+        x = screen_width - width - 20
+        y = 20
+        
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
+        
+        # Полупрозрачный фон
+        self.root.attributes('-alpha', 0.85)
+        
+        frame = tk.Frame(self.root, bg='#0078D7', relief='raised', borderwidth=2)
+        frame.pack(fill='both', expand=True)
+        
+        self.label = tk.Label(
+            frame,
+            text=f"👤 {self.student_name}",
+            font=('Segoe UI', 16, 'bold'),
+            bg='#0078D7',
+            fg='white'
+        )
+        self.label.pack(expand=True)
+        
+        # Запускаем главный цикл Tkinter
+        try:
+            self.root.mainloop()
+        except Exception:
+            pass
+    
+    def update_name(self, new_name):
+        """Обновление имени студента."""
+        self.student_name = new_name
+        if self.label and self.root:
+            try:
+                self.label.config(text=f"👤 {new_name}")
+            except Exception:
+                pass
+    
+    def stop(self):
+        """Остановка плашки."""
+        if not self.running:
+            return
+        
+        self.running = False
+        
+        if self.root:
+            try:
+                self.root.quit()
+            except Exception:
+                pass
+            
+            # Отложенное уничтожение окна после выхода из mainloop
+            try:
+                self.root.after(100, self.root.destroy)
+            except Exception:
+                pass
+        
+        # Ждём завершения потока
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=2.0)
+        
+        self.thread = None
+        self.root = None
+        self.label = None
+
+
+def show_name_input_dialog():
+    """Показать диалог ввода имени студента."""
+    import tkinter as tk
+    from tkinter import messagebox
+    
+    result = {'name': None}
+    
+    def on_submit():
+        name = entry.get().strip()
+        if not name:
+            messagebox.showwarning("Предупреждение", "Пожалуйста, введите имя!")
+            return
+        
+        result['name'] = name
+        root.destroy()
+    
+    def on_skip():
+        result['name'] = get_hostname()
+        root.destroy()
+    
+    root = tk.Tk()
+    root.title("Ввод имени студента")
+    root.attributes('-topmost', True)
+    
+    # Центрирование окна
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+    width = 400
+    height = 180
+    x = (screen_width - width) // 2
+    y = (screen_height - height) // 2
+    root.geometry(f"{width}x{height}+{x}+{y}")
+    
+    # Заголовок
+    title_label = tk.Label(
+        root,
+        text="Добро пожаловать!",
+        font=('Segoe UI', 14, 'bold')
+    )
+    title_label.pack(pady=(20, 10))
+    
+    # Подпись
+    desc_label = tk.Label(
+        root,
+        text="Введите ваше имя для мониторинга:",
+        font=('Segoe UI', 10)
+    )
+    desc_label.pack(pady=(0, 10))
+    
+    # Поле ввода
+    entry = tk.Entry(root, font=('Segoe UI', 12), justify='center')
+    entry.pack(pady=5, padx=40, fill='x')
+    entry.focus()
+    
+    # Кнопки
+    btn_frame = tk.Frame(root)
+    btn_frame.pack(pady=15)
+    
+    submit_btn = tk.Button(
+        btn_frame,
+        text="OK",
+        command=on_submit,
+        font=('Segoe UI', 10, 'bold'),
+        bg='#0078D7',
+        fg='white',
+        width=10
+    )
+    submit_btn.pack(side='left', padx=10)
+    
+    skip_btn = tk.Button(
+        btn_frame,
+        text="Пропустить",
+        command=on_skip,
+        font=('Segoe UI', 10),
+        width=10
+    )
+    skip_btn.pack(side='left', padx=10)
+    
+    # Обработка Enter
+    root.bind('<Return>', lambda e: on_submit())
+    
+    root.mainloop()
+    
+    return result['name']
+
 class StudentClient:
     """Клиент для компьютера ученика."""
     
     def __init__(self, student_name=None):
+        # Если имя не передано, показываем диалог ввода
+        if not student_name:
+            student_name = show_name_input_dialog()
+        
         self.student_name = student_name or get_hostname()
         self.server_address = None
         self.is_blocked = False
         self.is_test_mode = False
         self.block_window = None
         self.message_overlay = None
+        self.name_overlay = None  # Плашка с именем
         self.running = True
         self.socket_thread = None
         self.status = STATUS_IDLE
@@ -60,6 +250,18 @@ class StudentClient:
         self.log_file = self.log_dir / f"client_{datetime.now().strftime('%Y%m%d')}.log"
         
         self._log(f"Клиент запущен. Имя студента: {self.student_name}")
+        
+        # Запускаем плашку с именем
+        self._start_name_overlay()
+    
+    def _start_name_overlay(self):
+        """Запуск плашки с именем студента."""
+        try:
+            self.name_overlay = NameOverlay(self.student_name)
+            self.name_overlay.start()
+            self._log("Плашка с именем запущена")
+        except Exception as e:
+            self._log(f"Ошибка запуска плашки: {e}")
     
     def _log(self, message):
         """Логирование событий."""
@@ -488,6 +690,14 @@ class StudentClient:
         """Остановка клиента."""
         self._log("Остановка клиента...")
         self.running = False
+        
+        # Останавливаем плашку с именем
+        if self.name_overlay:
+            try:
+                self.name_overlay.stop()
+            except Exception as e:
+                self._log(f"Ошибка остановки плашки: {e}")
+            self.name_overlay = None
         
         if hasattr(self, 'client_socket'):
             try:
