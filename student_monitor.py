@@ -7,10 +7,16 @@ import threading
 import os
 import sys
 import json
-import ctypes
 from datetime import datetime
-import winsound
 import traceback
+import platform
+
+# Кроссплатформенная проверка Windows
+IS_WINDOWS = platform.system() == 'Windows'
+
+if IS_WINDOWS:
+    import ctypes
+    import winsound
 
 from extended_monitoring import (
     FileMonitor, BrowserTracker, InstallGuard, load_settings
@@ -99,21 +105,50 @@ class SingleInstance:
     
     def is_already_running(self):
         """Возвращает True если программа уже запущена"""
-        try:
-            self.mutex = ctypes.windll.kernel32.CreateMutexW(
-                None, False, self.mutex_name
-            )
-            last_error = ctypes.windll.kernel32.GetLastError()
-            return last_error == 183
-        except Exception as e:
-            debug_log(f"[ЗАЩИТА] Ошибка проверки: {e}")
-            return False
+        if not IS_WINDOWS:
+            # На Linux/Mac используем файл-блокировку
+            import fcntl
+            self.lock_file = os.path.join(APP_DIR, ".student_monitor.lock")
+            try:
+                self.mutex = open(self.lock_file, 'w')
+                fcntl.flock(self.mutex.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return False  # Файл заблокирован успешно - не запущена
+            except (IOError, OSError):
+                if self.mutex:
+                    self.mutex.close()
+                return True  # Не удалось заблокировать - уже запущена
+            except Exception as e:
+                debug_log(f"[ЗАЩИТА] Ошибка проверки (Linux/Mac): {e}")
+                return False
+        else:
+            # На Windows используем мьютекс
+            try:
+                self.mutex = ctypes.windll.kernel32.CreateMutexW(
+                    None, False, self.mutex_name
+                )
+                last_error = ctypes.windll.kernel32.GetLastError()
+                return last_error == 183
+            except Exception as e:
+                debug_log(f"[ЗАЩИТА] Ошибка проверки: {e}")
+                return False
     
     def release(self):
         """Освободить мьютекс при выходе"""
         try:
-            if self.mutex:
-                ctypes.windll.kernel32.CloseHandle(self.mutex)
+            if not IS_WINDOWS:
+                # На Linux/Mac освобождаем файловую блокировку
+                if hasattr(self, 'mutex') and self.mutex:
+                    import fcntl
+                    fcntl.flock(self.mutex.fileno(), fcntl.LOCK_UN)
+                    self.mutex.close()
+                    try:
+                        os.remove(self.lock_file)
+                    except:
+                        pass
+            else:
+                # На Windows закрываем хендл мьютекса
+                if self.mutex:
+                    ctypes.windll.kernel32.CloseHandle(self.mutex)
         except:
             pass
 
@@ -192,6 +227,7 @@ class NameOverlay:
         self.lesson_number = lesson_number
         self.root = None
         self.running = False
+        self.thread = None
     
     def run(self):
         """Запуск плашки"""
@@ -250,19 +286,31 @@ class NameOverlay:
     
     def start(self):
         """Запуск плашки в отдельном потоке"""
-        thread = threading.Thread(target=self.run, daemon=True)
-        thread.start()
-        return thread
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+        return self.thread
     
     def stop(self):
         """Остановка плашки"""
         self.running = False
         try:
             if self.root and self.root.winfo_exists():
-                self.root.quit()
-                self.root.destroy()
-        except:
-            pass
+                try:
+                    self.root.quit()
+                except:
+                    pass
+                try:
+                    self.root.after(100, self.root.destroy)
+                except:
+                    self.root.destroy()
+                
+                # Ждем завершения потока (но не дольше 2 секунд)
+                if self.thread and self.thread.is_alive():
+                    self.thread.join(timeout=2.0)
+        except Exception as e:
+            debug_log(f"[ПЛАШКА] Ошибка при остановке: {e}")
+        
+        self.thread = None
 
 
 # ============================================================
@@ -764,7 +812,11 @@ class StudentMonitor:
                     self.current_lesson = lesson
                     
                     try:
-                        winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+                        if IS_WINDOWS:
+                            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+                        else:
+                            # Кроссплатформенный звуковой сигнал
+                            print("\a", end='', flush=True)  # Системный bell
                     except:
                         pass
                     
