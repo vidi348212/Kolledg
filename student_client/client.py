@@ -1,6 +1,7 @@
 """
 Клиентская часть системы мониторинга для компьютера ученика.
 Запускается в фоновом режиме, слушает команды от учителя и выполняет их.
+Включает функционал расписания, ввода имени и плашки из локальной версии.
 """
 import sys
 import os
@@ -9,6 +10,7 @@ import threading
 import json
 import time
 import subprocess
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -40,228 +42,292 @@ try:
 except ImportError:
     WINDOWS_AVAILABLE = False
 
+# ============================================================
+# ОПРЕДЕЛЕНИЕ ПАПКИ ПРОГРАММЫ И РАСПИСАНИЯ
+# ============================================================
+
+def get_app_directory():
+    """Возвращает папку, где находится программа"""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    else:
+        return os.path.dirname(os.path.abspath(__file__))
+
+
+def find_schedule_file():
+    """Ищет файл расписания в нескольких возможных местах"""
+    app_dir = get_app_directory()
+    
+    possible_paths = [
+        os.path.join(app_dir, "schedule.json"),
+        os.path.join(app_dir, "..", "schedule.json"),
+        os.path.join(os.getcwd(), "schedule.json"),
+        os.path.join(app_dir, "..", "dist", "schedule.json"),
+    ]
+    
+    for path in possible_paths:
+        full_path = os.path.abspath(path)
+        if os.path.exists(full_path):
+            return full_path
+    
+    return os.path.join(app_dir, "schedule.json")
+
+
+APP_DIR = get_app_directory()
+SCHEDULE_FILE = find_schedule_file()
+LOGS_DIR = Path(APP_DIR) / 'logs'
+LOGS_DIR.mkdir(exist_ok=True)
+DEBUG_LOG = LOGS_DIR / "debug.txt"
+
+
+def debug_log(message):
+    """Запись отладочной информации"""
+    try:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(DEBUG_LOG, "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {message}\n")
+        print(f"[{timestamp}] {message}")
+    except Exception as e:
+        print(f"Ошибка записи в лог: {e}")
+
+
+# ============================================================
+# МЕНЕДЖЕР РАСПИСАНИЯ
+# ============================================================
+
+class ScheduleManager:
+    """Управление расписанием уроков"""
+    
+    def __init__(self, schedule_file=None):
+        self.schedule_file = schedule_file or SCHEDULE_FILE
+        self.last_modified = 0
+        self.load_schedule()
+        self.update_file_time()
+    
+    def update_file_time(self):
+        try:
+            if os.path.exists(self.schedule_file):
+                self.last_modified = os.path.getmtime(self.schedule_file)
+        except Exception:
+            self.last_modified = 0
+    
+    def check_and_reload(self):
+        try:
+            if not os.path.exists(self.schedule_file):
+                debug_log(f"[РАСПИСАНИЕ] Файл не найден: {self.schedule_file}")
+                return False
+            current_modified = os.path.getmtime(self.schedule_file)
+            if current_modified != self.last_modified:
+                debug_log(f"[РАСПИСАНИЕ] Файл изменён, перезагрузка...")
+                self.load_schedule()
+                self.update_file_time()
+                return True
+            return False
+        except Exception as e:
+            debug_log(f"[РАСПИСАНИЕ] Ошибка проверки: {e}")
+            return False
+    
+    def load_schedule(self):
+        try:
+            debug_log(f"[РАСПИСАНИЕ] Загрузка: {self.schedule_file}")
+            if os.path.exists(self.schedule_file):
+                with open(self.schedule_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.lessons = data.get("lessons", [])
+                    self.ask_every_lesson = data.get("ask_name_every_lesson", True)
+                debug_log(f"[РАСПИСАНИЕ] Загружено уроков: {len(self.lessons)}")
+            else:
+                debug_log(f"[РАСПИСАНИЕ] Файл НЕ найден!")
+                self.lessons = []
+                self.ask_every_lesson = True
+        except json.JSONDecodeError as e:
+            debug_log(f"[РАСПИСАНИЕ] ОШИБКА ФОРМАТА JSON: {e}")
+            self.lessons = []
+            self.ask_every_lesson = True
+        except Exception as e:
+            debug_log(f"[РАСПИСАНИЕ] Ошибка: {e}")
+            self.lessons = []
+            self.ask_every_lesson = True
+    
+    def get_current_lesson(self):
+        now = datetime.now().strftime("%H:%M")
+        for lesson in self.lessons:
+            if lesson["start"] <= now < lesson["end"]:
+                return lesson
+        return None
+    
+    def is_lesson_time(self):
+        return self.get_current_lesson() is not None
+
+
+# ============================================================
+# ПЛАШКА С ИМЕНЕМ УЧЕНИКА (как в локальной версии)
+# ============================================================
 
 class NameOverlay:
-    """Плашка с именем студента в углу экрана."""
+    """Полупрозрачная плашка с именем ученика по центру вверху (стиль локальной версии)"""
     
-    def __init__(self, student_name):
+    def __init__(self, student_name, lesson_number=None):
         self.student_name = student_name
+        self.lesson_number = lesson_number
         self.root = None
-        self.label = None
         self.running = False
         self.thread = None
+    
+    def run(self):
+        """Запуск плашки"""
+        try:
+            import tkinter as tk
+            import tkinter.font as tkfont
+            
+            self.root = tk.Tk()
+            self.root.title("Инфо об ученике")
+            
+            self.root.overrideredirect(True)
+            self.root.attributes('-topmost', True)
+            self.root.attributes('-alpha', 0.85)
+            self.root.protocol("WM_DELETE_WINDOW", lambda: None)
+            
+            font = tkfont.Font(family="Arial", size=24, weight="bold")
+            text_width = font.measure(self.student_name)
+            
+            padding = 40
+            window_w = text_width + padding
+            window_h = 60
+            
+            if window_w < 200:
+                window_w = 200
+            
+            screen_w = self.root.winfo_screenwidth()
+            x = (screen_w - window_w) // 2
+            y = 20
+            self.root.geometry(f"{window_w}x{window_h}+{x}+{y}")
+            
+            bg_color = "#2c3e50"
+            self.root.configure(bg=bg_color)
+            
+            tk.Label(
+                self.root,
+                text=self.student_name,
+                font=("Arial", 24, "bold"),
+                fg="white",
+                bg=bg_color
+            ).pack(expand=True)
+            
+            def start_drag(event):
+                self._drag_x = event.x
+                self._drag_y = event.y
+            
+            def on_drag(event):
+                x = self.root.winfo_x() + event.x - self._drag_x
+                y = self.root.winfo_y() + event.y - self._drag_y
+                self.root.geometry(f"+{x}+{y}")
+            
+            self.root.bind("<Button-1>", start_drag)
+            self.root.bind("<B1-Motion>", on_drag)
+            
+            self.running = True
+            self.root.mainloop()
+            
+        except Exception as e:
+            debug_log(f"[ПЛАШКА] Ошибка: {e}")
     
     def start(self):
-        """Запуск плашки в отдельном потоке."""
-        if self.running:
-            return
-        
-        self.running = True
-        self.thread = threading.Thread(target=self._run_overlay, daemon=True)
+        """Запуск плашки в отдельном потоке"""
+        self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
-    
-    def _run_overlay(self):
-        """Основной цикл плашки (должен работать в отдельном потоке)."""
-        import tkinter as tk
-        
-        self.root = tk.Tk()
-        self.root.title("Student Name")
-        
-        # Убираем рамки и делаем окно поверх всех
-        self.root.overrideredirect(True)
-        self.root.attributes('-topmost', True)
-        
-        # Позиция: правый верхний угол
-        screen_width = self.root.winfo_screenwidth()
-        screen_height = self.root.winfo_screenheight()
-        
-        width = 300
-        height = 60
-        x = screen_width - width - 20
-        y = 20
-        
-        self.root.geometry(f"{width}x{height}+{x}+{y}")
-        
-        # Полупрозрачный фон
-        self.root.attributes('-alpha', 0.85)
-        
-        frame = tk.Frame(self.root, bg='#0078D7', relief='raised', borderwidth=2)
-        frame.pack(fill='both', expand=True)
-        
-        self.label = tk.Label(
-            frame,
-            text=f"👤 {self.student_name}",
-            font=('Segoe UI', 16, 'bold'),
-            bg='#0078D7',
-            fg='white'
-        )
-        self.label.pack(expand=True)
-        
-        # Запускаем главный цикл Tkinter
-        try:
-            self.root.mainloop()
-        except Exception:
-            pass
-    
-    def update_name(self, new_name):
-        """Обновление имени студента."""
-        self.student_name = new_name
-        if self.label and self.root:
-            try:
-                self.label.config(text=f"👤 {new_name}")
-            except Exception:
-                pass
+        return self.thread
     
     def stop(self):
-        """Остановка плашки."""
-        if not self.running:
-            return
-        
+        """Остановка плашки"""
         self.running = False
-        
-        if self.root:
-            try:
-                self.root.quit()
-            except Exception:
-                pass
-            
-            # Отложенное уничтожение окна после выхода из mainloop
-            try:
-                self.root.after(100, self.root.destroy)
-            except Exception:
-                pass
-        
-        # Ждём завершения потока
-        if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=2.0)
+        try:
+            if self.root and self.root.winfo_exists():
+                try:
+                    self.root.quit()
+                except:
+                    pass
+                try:
+                    self.root.after(100, self.root.destroy)
+                except:
+                    self.root.destroy()
+                
+                # Ждем завершения потока (но не дольше 2 секунд)
+                if self.thread and self.thread.is_alive():
+                    self.thread.join(timeout=2.0)
+        except Exception as e:
+            debug_log(f"[ПЛАШКА] Ошибка при остановке: {e}")
         
         self.thread = None
-        self.root = None
-        self.label = None
-
-
-def show_name_input_dialog():
-    """Показать диалог ввода имени студента."""
-    import tkinter as tk
-    from tkinter import messagebox
-    
-    result = {'name': None}
-    
-    def on_submit():
-        name = entry.get().strip()
-        if not name:
-            messagebox.showwarning("Предупреждение", "Пожалуйста, введите имя!")
-            return
-        
-        result['name'] = name
-        root.destroy()
-    
-    def on_skip():
-        result['name'] = get_hostname()
-        root.destroy()
-    
-    root = tk.Tk()
-    root.title("Ввод имени студента")
-    root.attributes('-topmost', True)
-    
-    # Центрирование окна
-    screen_width = root.winfo_screenwidth()
-    screen_height = root.winfo_screenheight()
-    width = 400
-    height = 180
-    x = (screen_width - width) // 2
-    y = (screen_height - height) // 2
-    root.geometry(f"{width}x{height}+{x}+{y}")
-    
-    # Заголовок
-    title_label = tk.Label(
-        root,
-        text="Добро пожаловать!",
-        font=('Segoe UI', 14, 'bold')
-    )
-    title_label.pack(pady=(20, 10))
-    
-    # Подпись
-    desc_label = tk.Label(
-        root,
-        text="Введите ваше имя для мониторинга:",
-        font=('Segoe UI', 10)
-    )
-    desc_label.pack(pady=(0, 10))
-    
-    # Поле ввода
-    entry = tk.Entry(root, font=('Segoe UI', 12), justify='center')
-    entry.pack(pady=5, padx=40, fill='x')
-    entry.focus()
-    
-    # Кнопки
-    btn_frame = tk.Frame(root)
-    btn_frame.pack(pady=15)
-    
-    submit_btn = tk.Button(
-        btn_frame,
-        text="OK",
-        command=on_submit,
-        font=('Segoe UI', 10, 'bold'),
-        bg='#0078D7',
-        fg='white',
-        width=10
-    )
-    submit_btn.pack(side='left', padx=10)
-    
-    skip_btn = tk.Button(
-        btn_frame,
-        text="Пропустить",
-        command=on_skip,
-        font=('Segoe UI', 10),
-        width=10
-    )
-    skip_btn.pack(side='left', padx=10)
-    
-    # Обработка Enter
-    root.bind('<Return>', lambda e: on_submit())
-    
-    root.mainloop()
-    
-    return result['name']
 
 class StudentClient:
-    """Клиент для компьютера ученика."""
+    """Клиент для компьютера ученика с поддержкой расписания и ввода имени."""
     
-    def __init__(self, student_name=None):
-        # Если имя не передано, показываем диалог ввода
-        if not student_name:
-            student_name = show_name_input_dialog()
-        
-        self.student_name = student_name or get_hostname()
+    def __init__(self):
+        self.student_name = ""
         self.server_address = None
         self.is_blocked = False
         self.is_test_mode = False
         self.block_window = None
         self.message_overlay = None
-        self.name_overlay = None  # Плашка с именем
+        self.name_overlay = None
+        self.overlay_timer = None
         self.running = True
         self.socket_thread = None
         self.status = STATUS_IDLE
+        self.current_lesson = None
+        self.schedule_manager = ScheduleManager()
+        self.start_time = time.time()
         
         # Путь для логирования
         self.log_dir = Path(__file__).parent / 'logs'
         self.log_dir.mkdir(exist_ok=True)
         self.log_file = self.log_dir / f"client_{datetime.now().strftime('%Y%m%d')}.log"
         
-        self._log(f"Клиент запущен. Имя студента: {self.student_name}")
+        self._log(f"Клиент запущен. Расписание: {SCHEDULE_FILE}")
+        self._log(f"Уроков в расписании: {len(self.schedule_manager.lessons)}")
         
-        # Запускаем плашку с именем
-        self._start_name_overlay()
+        # Запускаем главный цикл с расписанием
+        self._run_schedule_loop()
     
     def _start_name_overlay(self):
         """Запуск плашки с именем студента."""
         try:
-            self.name_overlay = NameOverlay(self.student_name)
+            if self.name_overlay:
+                self.name_overlay.stop()
+            lesson_num = self.current_lesson['lesson'] if self.current_lesson else None
+            self.name_overlay = NameOverlay(self.student_name, lesson_num)
             self.name_overlay.start()
-            self._log("Плашка с именем запущена")
+            self._log(f"Плашка с именем запущена: {self.student_name}")
         except Exception as e:
             self._log(f"Ошибка запуска плашки: {e}")
+    
+    def _stop_name_overlay(self):
+        """Остановка плашки."""
+        if self.name_overlay:
+            self.name_overlay.stop()
+            self.name_overlay = None
+            self._log("Плашка остановлена")
+    
+    def _schedule_hide_overlay(self, minutes=5):
+        """Запланировать скрытие плашки через N минут."""
+        if self.overlay_timer:
+            self.overlay_timer.cancel()
+        
+        def delayed_hide():
+            self._stop_name_overlay()
+            self.overlay_timer = None
+        
+        self.overlay_timer = threading.Timer(minutes * 60, delayed_hide)
+        self.overlay_timer.daemon = True
+        self.overlay_timer.start()
+        self._log(f"Запланировано скрытие плашки через {minutes} минут")
+    
+    def _cancel_overlay_timer(self):
+        """Отменить таймер скрытия плашки."""
+        if self.overlay_timer:
+            self.overlay_timer.cancel()
+            self.overlay_timer = None
     
     def _log(self, message):
         """Логирование событий."""
@@ -274,6 +340,11 @@ class StudentClient:
                 f.write(log_entry)
         except Exception as e:
             print(f"Ошибка записи в лог: {e}")
+    
+    def _log_event(self, event_type, details):
+        """Запись события в лог с информацией об уроке."""
+        lesson_info = f"Урок {self.current_lesson['lesson']}" if self.current_lesson else "Вне урока"
+        self._log(f"[{event_type}] {lesson_info}: {details}")
     
     def discover_server(self, timeout=5):
         """Поиск сервера учителя через широковещательную рассылку."""
