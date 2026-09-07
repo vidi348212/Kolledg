@@ -790,7 +790,7 @@ def main():
     
     args = parser.parse_args()
     
-    client = StudentClient(student_name=args.name)
+    client = StudentClient()
     
     try:
         client.run()
